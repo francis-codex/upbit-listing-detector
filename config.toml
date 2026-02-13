@@ -1,0 +1,23 @@
+[api]
+market_endpoint = "https://api.upbit.com/v1/market/all"
+websocket_endpoint = "wss://api.upbit.com/websocket/v1"
+# Set after manual discovery via browser DevTools on https://upbit.com/service_center/notice
+notice_endpoint = ""
+
+[polling]
+market_interval_seconds = 2
+notice_interval_seconds = 3
+websocket_reconnect_delay_seconds = 5
+
+[redis]
+url = "redis://127.0.0.1:6379"
+key_prefix = "upbit:"
+connection_timeout_seconds = 5
+
+[telegram]
+# Set via environment variables TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID
+bot_token = ""
+chat_id = ""
+
+[filters]
+min_confidence = 0.6

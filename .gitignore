@@ -1,0 +1,24 @@
+# Build artifacts
+/target/
+
+# Environment variables (contains secrets)
+.env
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Conversation logs
+*.txt
+
+# Backup files
+*.bak
+*.orig

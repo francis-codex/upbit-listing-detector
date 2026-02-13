@@ -1,0 +1,27 @@
+[Unit]
+Description=Upbit Listing Detector
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/upbit-detector
+EnvironmentFile=/opt/upbit-detector/.env
+Environment=RUST_LOG=info
+ExecStart=/usr/local/bin/upbit-listing-detector
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=upbit-detector
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/
+ReadWritePaths=/opt/upbit-detector
+
+[Install]
+WantedBy=multi-user.target
