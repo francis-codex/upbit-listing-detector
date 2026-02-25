@@ -13,67 +13,41 @@ use crate::config::Config;
 use crate::filters::keywords;
 use crate::filters::parser;
 
-/// A single notice from the Upbit notice board.
-///
-/// The actual JSON structure depends on the reverse-engineered endpoint.
-/// Adjust fields as needed once the real API shape is discovered.
+/// A single notice from the Upbit announcements API.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Notice {
-    /// Unique notice ID (numeric or string depending on endpoint).
-    #[serde(alias = "id", alias = "noticeId")]
-    pub id: serde_json::Value,
-
-    /// Notice title text (Korean).
-    #[serde(alias = "title", alias = "subject")]
+    pub id: u64,
     pub title: String,
-
-    /// Full URL to the notice detail page (may need construction).
-    #[serde(default)]
-    pub url: Option<String>,
-
-    /// Publication date string.
-    #[serde(default, alias = "createdAt", alias = "created_at", alias = "date")]
-    pub created_at: Option<String>,
+    pub category: String,
+    pub listed_at: String,
+    pub first_listed_at: String,
 }
 
 impl Notice {
     fn id_string(&self) -> String {
-        match &self.id {
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        }
+        self.id.to_string()
+    }
+
+    fn detail_url(&self) -> String {
+        format!("https://upbit.com/service_center/notice?id={}", self.id)
     }
 }
 
-/// Wrapper for the notice API response.
-/// Handles both `{ "data": { "list": [...] } }` and bare `[...]` shapes.
+/// Upbit announcements API response: `{ "success": true, "data": { "notices": [...] } }`
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum NoticeResponse {
-    Wrapped {
-        data: NoticeData,
-    },
-    WrappedSimple {
-        #[serde(alias = "notices", alias = "list")]
-        list: Vec<Notice>,
-    },
-    Bare(Vec<Notice>),
+struct NoticeResponse {
+    success: bool,
+    data: NoticeData,
 }
 
 #[derive(Debug, Deserialize)]
 struct NoticeData {
-    #[serde(alias = "notices", alias = "list")]
-    list: Vec<Notice>,
+    notices: Vec<Notice>,
 }
 
 impl NoticeResponse {
     fn into_notices(self) -> Vec<Notice> {
-        match self {
-            NoticeResponse::Wrapped { data } => data.list,
-            NoticeResponse::WrappedSimple { list } => list,
-            NoticeResponse::Bare(v) => v,
-        }
+        self.data.notices
     }
 }
 
@@ -155,6 +129,7 @@ async fn fetch_notices(client: &Client, url: &str) -> Result<Vec<Notice>> {
             .get(url)
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
             .header("Accept", "application/json")
+            .header("Origin", "https://upbit.com")
             .header("Referer", "https://upbit.com/service_center/notice")
             .send()
             .await
@@ -225,7 +200,8 @@ async fn process_notice(
         "🚨 LISTING ANNOUNCEMENT DETECTED via Notice Board"
     );
 
-    let link = notice.url.as_deref();
+    let detail_url = notice.detail_url();
+    let link = Some(detail_url.as_str());
 
     match listing_info {
         Some(info) => {

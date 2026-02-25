@@ -1,8 +1,7 @@
 [api]
 market_endpoint = "https://api.upbit.com/v1/market/all"
 websocket_endpoint = "wss://api.upbit.com/websocket/v1"
-# Set after manual discovery via browser DevTools on https://upbit.com/service_center/notice
-notice_endpoint = ""
+notice_endpoint = "https://api-manager.upbit.com/api/v1/announcements?os=web&page=1&per_page=20&category=all"
 
 [polling]
 market_interval_seconds = 2
