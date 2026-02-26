@@ -12,6 +12,7 @@ use crate::cache::redis::RedisCache;
 use crate::config::Config;
 use crate::filters::keywords;
 use crate::filters::parser;
+use crate::stats::Stats;
 
 /// A single notice from the Upbit announcements API.
 #[derive(Debug, Deserialize, Clone)]
@@ -62,6 +63,7 @@ pub async fn run(
     client: Client,
     telegram: Arc<TelegramAlert>,
     discord: Option<Arc<DiscordAlert>>,
+    stats: Arc<Stats>,
 ) -> Result<()> {
     let endpoint = &config.api.notice_endpoint;
     if endpoint.is_empty() {
@@ -96,6 +98,7 @@ pub async fn run(
     loop {
         sleep(interval).await;
 
+        stats.notice_polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match fetch_notices(&client, endpoint).await {
             Ok(notices) => {
                 for notice in notices {

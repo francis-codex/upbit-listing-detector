@@ -11,6 +11,7 @@ use crate::alerts::telegram::TelegramAlert;
 use crate::alerts::discord::DiscordAlert;
 use crate::cache::redis::RedisCache;
 use crate::config::Config;
+use crate::stats::Stats;
 
 /// Market as returned by the Upbit market/all endpoint.
 #[derive(Debug, Deserialize, Clone)]
@@ -31,6 +32,7 @@ pub async fn run(
     client: Client,
     telegram: Arc<TelegramAlert>,
     discord: Option<Arc<DiscordAlert>>,
+    stats: Arc<Stats>,
 ) -> Result<()> {
     let interval = Duration::from_secs(config.polling.market_interval_seconds);
     let url = &config.api.market_endpoint;
@@ -53,9 +55,10 @@ pub async fn run(
     loop {
         sleep_with_jitter(interval).await;
 
+        stats.market_polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match fetch_markets(&client, url).await {
             Ok(markets) => {
-                if let Err(e) = process_markets(&markets, &redis, &telegram, discord.as_deref()).await {
+                if let Err(e) = process_markets(&markets, &redis, &telegram, discord.as_deref(), &stats).await {
                     error!(error = %e, "Error processing markets");
                 }
             }
@@ -105,6 +108,7 @@ async fn process_markets(
     redis: &RedisCache,
     telegram: &TelegramAlert,
     discord: Option<&DiscordAlert>,
+    stats: &Stats,
 ) -> Result<()> {
     let cached = redis.get_markets().await?;
     if cached.is_empty() {
@@ -144,6 +148,7 @@ async fn process_markets(
 
         // Send alerts for KRW markets (highest priority)
         if is_krw {
+            stats.new_listings_detected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Err(e) = telegram
                 .send_new_market_alert(&market.market, &market.korean_name, &market.english_name)
                 .await

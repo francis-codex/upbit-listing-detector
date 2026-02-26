@@ -3,6 +3,7 @@ mod cache;
 mod config;
 mod detectors;
 mod filters;
+mod stats;
 
 use std::sync::Arc;
 
@@ -73,6 +74,9 @@ async fn main() -> Result<()> {
         error!(error = %e, "Failed to send startup notification (non-fatal)");
     }
 
+    // Shared stats for daily health report
+    let stats = Arc::new(stats::Stats::new());
+
     info!("All components initialized. Starting detection loops.");
 
     // Set up graceful shutdown
@@ -87,6 +91,7 @@ async fn main() -> Result<()> {
             client.clone(),
             telegram.clone(),
             discord.clone(),
+            stats.clone(),
         ) => {
             error!(error = ?result, "Market API detector exited");
         }
@@ -97,6 +102,7 @@ async fn main() -> Result<()> {
             client.clone(),
             telegram.clone(),
             discord.clone(),
+            stats.clone(),
         ) => {
             error!(error = ?result, "WebSocket monitor exited");
         }
@@ -107,8 +113,17 @@ async fn main() -> Result<()> {
             client.clone(),
             telegram.clone(),
             discord.clone(),
+            stats.clone(),
         ) => {
             error!(error = ?result, "Notice detector exited");
+        }
+
+        _ = stats::run_daily_report(
+            stats.clone(),
+            redis.clone(),
+            telegram.clone(),
+        ) => {
+            error!("Daily report loop exited");
         }
 
         _ = shutdown => {

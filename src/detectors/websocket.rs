@@ -13,6 +13,7 @@ use crate::alerts::telegram::TelegramAlert;
 use crate::cache::redis::RedisCache;
 use crate::config::Config;
 use crate::detectors::market_api::Market;
+use crate::stats::Stats;
 
 /// Run the WebSocket monitor loop forever.
 ///
@@ -25,6 +26,7 @@ pub async fn run(
     client: Client,
     telegram: Arc<TelegramAlert>,
     discord: Option<Arc<DiscordAlert>>,
+    stats: Arc<Stats>,
 ) -> Result<()> {
     let ws_url = &config.api.websocket_endpoint;
     let market_url = &config.api.market_endpoint;
@@ -40,13 +42,16 @@ pub async fn run(
             &redis,
             &telegram,
             discord.as_deref(),
+            &stats,
         )
         .await
         {
             Ok(()) => {
+                stats.ws_connected.store(false, std::sync::atomic::Ordering::Relaxed);
                 warn!("WebSocket stream ended cleanly, reconnecting");
             }
             Err(e) => {
+                stats.ws_connected.store(false, std::sync::atomic::Ordering::Relaxed);
                 error!(error = %e, "WebSocket error, reconnecting");
             }
         }
@@ -61,6 +66,7 @@ async fn connect_and_listen(
     redis: &RedisCache,
     telegram: &TelegramAlert,
     discord: Option<&DiscordAlert>,
+    stats: &Stats,
 ) -> Result<()> {
     // Fetch current market codes to subscribe to
     let markets = fetch_krw_codes(client, market_url).await?;
@@ -78,6 +84,7 @@ async fn connect_and_listen(
         .context("WebSocket connection failed")?;
 
     info!("WebSocket connected");
+    stats.ws_connected.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let (mut write, mut read) = ws_stream.split();
 
