@@ -4,6 +4,8 @@ use redis::AsyncCommands;
 use std::collections::HashSet;
 use tracing::{debug, error, info};
 
+use crate::trading::position::OpenPosition;
+
 /// Redis-backed state cache for market codes, notice IDs, and alert history.
 pub struct RedisCache {
     conn: ConnectionManager,
@@ -103,36 +105,79 @@ impl RedisCache {
         Ok(())
     }
 
-    // ── Alert deduplication ───────────────────────────────────────────
+    // ── Trade deduplication ─────────────────────────────────────────
 
-    /// Record the timestamp of the last alert for a given token symbol,
-    /// returning true if an alert was already sent within `cooldown_secs`.
-    pub async fn is_alert_recent(&self, token: &str, cooldown_secs: u64) -> Result<bool> {
-        let key = self.key(&format!("alert:{token}"));
-        let ts: Option<i64> = self
+    /// Check if a trade was already placed for this symbol recently (1h TTL).
+    pub async fn is_trade_recent(&self, symbol: &str) -> Result<bool> {
+        let key = self.key(&format!("trade:{symbol}"));
+        let exists: bool = self
             .conn
             .clone()
-            .get(&key)
+            .exists(&key)
             .await
-            .context("Redis GET failed for alert timestamp")?;
-
-        if let Some(ts) = ts {
-            let now = chrono::Utc::now().timestamp();
-            return Ok((now - ts) < cooldown_secs as i64);
-        }
-        Ok(false)
+            .context("Redis EXISTS failed for trade key")?;
+        Ok(exists)
     }
 
-    /// Record that an alert was just sent for a token.
-    pub async fn record_alert(&self, token: &str) -> Result<()> {
-        let key = self.key(&format!("alert:{token}"));
+    /// Record that a trade was placed for a symbol (1h TTL).
+    pub async fn record_trade(&self, symbol: &str) -> Result<()> {
+        let key = self.key(&format!("trade:{symbol}"));
         let now = chrono::Utc::now().timestamp();
         self.conn
             .clone()
-            .set_ex::<_, _, ()>(&key, now, 3600) // expire after 1 hour
+            .set_ex::<_, _, ()>(&key, now, 3600)
             .await
-            .context("Redis SETEX failed for alert timestamp")?;
+            .context("Redis SETEX failed for trade key")?;
         Ok(())
+    }
+
+    // ── Position persistence ──────────────────────────────────────────
+
+    /// Save an open position to Redis (hash map keyed by position ID).
+    pub async fn save_position(&self, position: &OpenPosition) -> Result<()> {
+        let key = self.key("positions");
+        let json = serde_json::to_string(position).context("Failed to serialize position")?;
+        self.conn
+            .clone()
+            .hset::<_, _, _, ()>(&key, &position.id, &json)
+            .await
+            .context("Redis HSET failed for position")?;
+        debug!(id = position.id, symbol = position.symbol, "Position saved");
+        Ok(())
+    }
+
+    /// Remove a closed position from Redis.
+    pub async fn remove_position(&self, position_id: &str) -> Result<()> {
+        let key = self.key("positions");
+        self.conn
+            .clone()
+            .hdel::<_, _, ()>(&key, position_id)
+            .await
+            .context("Redis HDEL failed for position")?;
+        debug!(id = position_id, "Position removed");
+        Ok(())
+    }
+
+    /// Get all open positions from Redis.
+    pub async fn get_open_positions(&self) -> Result<Vec<OpenPosition>> {
+        let key = self.key("positions");
+        let entries: std::collections::HashMap<String, String> = self
+            .conn
+            .clone()
+            .hgetall(&key)
+            .await
+            .context("Redis HGETALL failed for positions")?;
+
+        let mut positions = Vec::new();
+        for (_id, json) in entries {
+            match serde_json::from_str::<OpenPosition>(&json) {
+                Ok(p) => positions.push(p),
+                Err(e) => {
+                    error!(error = %e, "Failed to deserialize position from Redis");
+                }
+            }
+        }
+        Ok(positions)
     }
 
     /// Health check – ping Redis.

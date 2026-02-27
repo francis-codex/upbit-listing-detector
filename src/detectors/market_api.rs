@@ -12,6 +12,7 @@ use crate::alerts::discord::DiscordAlert;
 use crate::cache::redis::RedisCache;
 use crate::config::Config;
 use crate::stats::Stats;
+use crate::trading::TradeSignal;
 
 /// Market as returned by the Upbit market/all endpoint.
 #[derive(Debug, Deserialize, Clone)]
@@ -33,6 +34,7 @@ pub async fn run(
     telegram: Arc<TelegramAlert>,
     discord: Option<Arc<DiscordAlert>>,
     stats: Arc<Stats>,
+    trade_tx: tokio::sync::mpsc::Sender<TradeSignal>,
 ) -> Result<()> {
     let interval = Duration::from_secs(config.polling.market_interval_seconds);
     let url = &config.api.market_endpoint;
@@ -58,7 +60,7 @@ pub async fn run(
         stats.market_polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match fetch_markets(&client, url).await {
             Ok(markets) => {
-                if let Err(e) = process_markets(&markets, &redis, &telegram, discord.as_deref(), &stats).await {
+                if let Err(e) = process_markets(&markets, &redis, &telegram, discord.as_deref(), &stats, &trade_tx).await {
                     error!(error = %e, "Error processing markets");
                 }
             }
@@ -109,6 +111,7 @@ async fn process_markets(
     telegram: &TelegramAlert,
     discord: Option<&DiscordAlert>,
     stats: &Stats,
+    trade_tx: &tokio::sync::mpsc::Sender<TradeSignal>,
 ) -> Result<()> {
     let cached = redis.get_markets().await?;
     if cached.is_empty() {
@@ -162,6 +165,18 @@ async fn process_markets(
                     .await
                 {
                     error!(error = %e, market = %market.market, "Failed to send Discord alert");
+                }
+            }
+
+            // Fire trade signal — extract symbol from "KRW-XXX"
+            if let Some(symbol) = market.market.strip_prefix("KRW-") {
+                let signal = TradeSignal {
+                    symbol: symbol.to_string(),
+                    source: "Market API".to_string(),
+                    confidence: None,
+                };
+                if let Err(e) = trade_tx.try_send(signal) {
+                    warn!(error = %e, "Failed to send trade signal from market API");
                 }
             }
         }

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use crate::filters::parser::ListingInfo;
 

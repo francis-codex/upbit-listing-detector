@@ -20,3 +20,35 @@ chat_id = ""
 
 [filters]
 min_confidence = 0.6
+
+[trading]
+enabled = false                    # kill-switch, default OFF
+position_size_usd = 50.0          # fixed USD per trade
+leverage = 2                       # start conservative
+max_open_positions = 3             # prevent runaway
+
+[trading.take_profit]
+levels = [
+    { percent = 80.0, close_fraction = 0.5 },
+    { percent = 100.0, close_fraction = 1.0 },
+]
+
+[trading.stop_loss]
+percent = 15.0
+
+[trading.time_exit]
+minutes = 30
+
+[trading.bybit]
+# Set via environment variables BYBIT_API_KEY and BYBIT_API_SECRET
+api_key = ""
+api_secret = ""
+testnet = true
+base_url = "https://api-testnet.bybit.com"
+
+[trading.binance]
+# Set via environment variables BINANCE_API_KEY and BINANCE_API_SECRET
+api_key = ""
+api_secret = ""
+testnet = true
+base_url = "https://testnet.binancefuture.com"

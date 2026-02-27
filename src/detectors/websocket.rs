@@ -14,6 +14,7 @@ use crate::cache::redis::RedisCache;
 use crate::config::Config;
 use crate::detectors::market_api::Market;
 use crate::stats::Stats;
+use crate::trading::TradeSignal;
 
 /// Run the WebSocket monitor loop forever.
 ///
@@ -27,6 +28,7 @@ pub async fn run(
     telegram: Arc<TelegramAlert>,
     discord: Option<Arc<DiscordAlert>>,
     stats: Arc<Stats>,
+    trade_tx: tokio::sync::mpsc::Sender<TradeSignal>,
 ) -> Result<()> {
     let ws_url = &config.api.websocket_endpoint;
     let market_url = &config.api.market_endpoint;
@@ -43,6 +45,7 @@ pub async fn run(
             &telegram,
             discord.as_deref(),
             &stats,
+            &trade_tx,
         )
         .await
         {
@@ -67,6 +70,7 @@ async fn connect_and_listen(
     telegram: &TelegramAlert,
     discord: Option<&DiscordAlert>,
     stats: &Stats,
+    trade_tx: &tokio::sync::mpsc::Sender<TradeSignal>,
 ) -> Result<()> {
     // Fetch current market codes to subscribe to
     let markets = fetch_krw_codes(client, market_url).await?;
@@ -108,12 +112,12 @@ async fn connect_and_listen(
     while let Some(msg) = read.next().await {
         match msg {
             Ok(Message::Text(text)) => {
-                handle_text_message(&text, &mut known_codes, redis, telegram, discord).await;
+                handle_text_message(&text, &mut known_codes, redis, telegram, discord, trade_tx).await;
             }
             Ok(Message::Binary(data)) => {
                 // Upbit sends binary (gzip) messages for ticker data
                 if let Ok(text) = String::from_utf8(data.to_vec()) {
-                    handle_text_message(&text, &mut known_codes, redis, telegram, discord).await;
+                    handle_text_message(&text, &mut known_codes, redis, telegram, discord, trade_tx).await;
                 }
             }
             Ok(Message::Ping(data)) => {
@@ -141,6 +145,7 @@ async fn handle_text_message(
     redis: &RedisCache,
     telegram: &TelegramAlert,
     discord: Option<&DiscordAlert>,
+    trade_tx: &tokio::sync::mpsc::Sender<TradeSignal>,
 ) {
     // Parse ticker message to extract market code
     let code = match extract_market_code(text) {
@@ -188,6 +193,16 @@ async fn handle_text_message(
             {
                 error!(error = %e, "Failed to send Discord alert from WebSocket");
             }
+        }
+
+        // Fire trade signal
+        let signal = TradeSignal {
+            symbol: symbol.to_string(),
+            source: "WebSocket".to_string(),
+            confidence: None,
+        };
+        if let Err(e) = trade_tx.try_send(signal) {
+            warn!(error = %e, "Failed to send trade signal from WebSocket");
         }
     }
 

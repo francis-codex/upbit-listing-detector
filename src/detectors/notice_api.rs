@@ -13,9 +13,11 @@ use crate::config::Config;
 use crate::filters::keywords;
 use crate::filters::parser;
 use crate::stats::Stats;
+use crate::trading::TradeSignal;
 
 /// A single notice from the Upbit announcements API.
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct Notice {
     pub id: u64,
     pub title: String,
@@ -36,6 +38,7 @@ impl Notice {
 
 /// Upbit announcements API response: `{ "success": true, "data": { "notices": [...] } }`
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct NoticeResponse {
     success: bool,
     data: NoticeData,
@@ -64,6 +67,7 @@ pub async fn run(
     telegram: Arc<TelegramAlert>,
     discord: Option<Arc<DiscordAlert>>,
     stats: Arc<Stats>,
+    trade_tx: tokio::sync::mpsc::Sender<TradeSignal>,
 ) -> Result<()> {
     let endpoint = &config.api.notice_endpoint;
     if endpoint.is_empty() {
@@ -108,6 +112,7 @@ pub async fn run(
                         &telegram,
                         discord.as_deref(),
                         min_confidence,
+                        &trade_tx,
                     )
                     .await
                     {
@@ -169,6 +174,7 @@ async fn process_notice(
     telegram: &TelegramAlert,
     discord: Option<&DiscordAlert>,
     min_confidence: f32,
+    trade_tx: &tokio::sync::mpsc::Sender<TradeSignal>,
 ) -> Result<()> {
     let id = notice.id_string();
 
@@ -207,19 +213,31 @@ async fn process_notice(
     let link = Some(detail_url.as_str());
 
     match listing_info {
-        Some(info) => {
+        Some(ref info) => {
             if let Err(e) = telegram
-                .send_listing_alert(&info, &notice.title, link, "Notice Board")
+                .send_listing_alert(info, &notice.title, link, "Notice Board")
                 .await
             {
                 error!(error = %e, "Failed to send Telegram notice alert");
             }
             if let Some(discord) = discord {
                 if let Err(e) = discord
-                    .send_listing_alert(&info, &notice.title, link, "Notice Board")
+                    .send_listing_alert(info, &notice.title, link, "Notice Board")
                     .await
                 {
                     error!(error = %e, "Failed to send Discord notice alert");
+                }
+            }
+
+            // Fire trade signal
+            if info.token_symbol != "UNKNOWN" {
+                let signal = TradeSignal {
+                    symbol: info.token_symbol.clone(),
+                    source: "Notice Board".to_string(),
+                    confidence: Some(info.confidence),
+                };
+                if let Err(e) = trade_tx.try_send(signal) {
+                    warn!(error = %e, "Failed to send trade signal from notice");
                 }
             }
         }

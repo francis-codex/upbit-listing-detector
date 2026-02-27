@@ -10,6 +10,8 @@ pub struct Config {
     pub telegram: TelegramConfig,
     pub discord: Option<DiscordConfig>,
     pub filters: FilterConfig,
+    #[serde(default)]
+    pub trading: TradingConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -30,6 +32,7 @@ pub struct PollingConfig {
 pub struct RedisConfig {
     pub url: String,
     pub key_prefix: String,
+    #[allow(dead_code)]
     pub connection_timeout_seconds: u64,
 }
 
@@ -47,6 +50,126 @@ pub struct DiscordConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct FilterConfig {
     pub min_confidence: f32,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TradingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_position_size")]
+    pub position_size_usd: f64,
+    #[serde(default = "default_leverage")]
+    pub leverage: u32,
+    #[serde(default = "default_max_positions")]
+    pub max_open_positions: u32,
+    #[serde(default)]
+    pub take_profit: TakeProfitConfig,
+    #[serde(default)]
+    pub stop_loss: StopLossConfig,
+    #[serde(default)]
+    pub time_exit: TimeExitConfig,
+    #[serde(default)]
+    pub bybit: ExchangeCredentials,
+    #[serde(default)]
+    pub binance: ExchangeCredentials,
+}
+
+fn default_position_size() -> f64 { 50.0 }
+fn default_leverage() -> u32 { 2 }
+fn default_max_positions() -> u32 { 3 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TakeProfitConfig {
+    #[serde(default = "default_tp_levels")]
+    pub levels: Vec<TakeProfitLevel>,
+}
+
+impl Default for TakeProfitConfig {
+    fn default() -> Self {
+        Self { levels: default_tp_levels() }
+    }
+}
+
+fn default_tp_levels() -> Vec<TakeProfitLevel> {
+    vec![
+        TakeProfitLevel { percent: 80.0, close_fraction: 0.5 },
+        TakeProfitLevel { percent: 100.0, close_fraction: 1.0 },
+    ]
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TakeProfitLevel {
+    pub percent: f64,
+    pub close_fraction: f64,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct StopLossConfig {
+    #[serde(default = "default_sl_percent")]
+    pub percent: f64,
+}
+
+impl Default for StopLossConfig {
+    fn default() -> Self {
+        Self { percent: default_sl_percent() }
+    }
+}
+
+fn default_sl_percent() -> f64 { 15.0 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TimeExitConfig {
+    #[serde(default = "default_time_exit_minutes")]
+    pub minutes: u64,
+}
+
+impl Default for TimeExitConfig {
+    fn default() -> Self {
+        Self { minutes: default_time_exit_minutes() }
+    }
+}
+
+fn default_time_exit_minutes() -> u64 { 30 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ExchangeCredentials {
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub api_secret: String,
+    #[serde(default = "default_true")]
+    pub testnet: bool,
+    #[serde(default)]
+    pub base_url: String,
+}
+
+fn default_true() -> bool { true }
+
+impl Default for ExchangeCredentials {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            api_secret: String::new(),
+            testnet: true,
+            base_url: String::new(),
+        }
+    }
+}
+
+impl Default for TradingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            position_size_usd: default_position_size(),
+            leverage: default_leverage(),
+            max_open_positions: default_max_positions(),
+            take_profit: TakeProfitConfig::default(),
+            stop_loss: StopLossConfig::default(),
+            time_exit: TimeExitConfig::default(),
+            bybit: ExchangeCredentials::default(),
+            binance: ExchangeCredentials::default(),
+        }
+    }
 }
 
 impl Config {
@@ -86,6 +209,20 @@ impl Config {
         }
         if let Ok(val) = std::env::var("DISCORD_WEBHOOK_URL") {
             config.discord = Some(DiscordConfig { webhook_url: val });
+        }
+
+        // Trading exchange credentials
+        if let Ok(val) = std::env::var("BYBIT_API_KEY") {
+            config.trading.bybit.api_key = val;
+        }
+        if let Ok(val) = std::env::var("BYBIT_API_SECRET") {
+            config.trading.bybit.api_secret = val;
+        }
+        if let Ok(val) = std::env::var("BINANCE_API_KEY") {
+            config.trading.binance.api_key = val;
+        }
+        if let Ok(val) = std::env::var("BINANCE_API_SECRET") {
+            config.trading.binance.api_secret = val;
         }
 
         config.validate()?;
@@ -128,6 +265,7 @@ impl Config {
             filters: FilterConfig {
                 min_confidence: 0.6,
             },
+            trading: TradingConfig::default(),
         }
     }
 

@@ -78,6 +78,7 @@ const SECONDARY_EN: &[&str] = &[
 
 /// Result of keyword analysis on a text.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FilterResult {
     /// Whether the text is considered a listing announcement.
     pub is_listing: bool,

@@ -5,6 +5,7 @@ use tracing::{debug, error, info};
 use crate::filters::parser::ListingInfo;
 
 /// Telegram alert sender using the Bot API.
+#[derive(Clone)]
 pub struct TelegramAlert {
     client: Client,
     bot_token: String,

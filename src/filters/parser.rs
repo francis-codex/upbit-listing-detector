@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 
 /// Extracted information about a listing announcement.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ListingInfo {
     /// Token symbol, e.g. "SOL"
     pub token_symbol: String,

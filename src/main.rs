@@ -4,6 +4,7 @@ mod config;
 mod detectors;
 mod filters;
 mod stats;
+mod trading;
 
 use std::sync::Arc;
 
@@ -15,6 +16,8 @@ use crate::alerts::discord::DiscordAlert;
 use crate::alerts::telegram::TelegramAlert;
 use crate::cache::redis::RedisCache;
 use crate::config::Config;
+use crate::trading::bybit::BybitExchange;
+use crate::trading::binance::BinanceExchange;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -77,12 +80,62 @@ async fn main() -> Result<()> {
     // Shared stats for daily health report
     let stats = Arc::new(stats::Stats::new());
 
+    // Create trade signal channel (mpsc)
+    let (trade_tx, trade_rx) = tokio::sync::mpsc::channel(64);
+
+    // Build exchange clients
+    let bybit_cfg = &config.trading.bybit;
+    let bybit_url = if bybit_cfg.base_url.is_empty() {
+        if bybit_cfg.testnet {
+            "https://api-testnet.bybit.com"
+        } else {
+            "https://api.bybit.com"
+        }
+    } else {
+        &bybit_cfg.base_url
+    };
+    let bybit = Arc::new(BybitExchange::new(
+        client.clone(),
+        bybit_url,
+        &bybit_cfg.api_key,
+        &bybit_cfg.api_secret,
+    ));
+
+    let binance_cfg = &config.trading.binance;
+    let binance_url = if binance_cfg.base_url.is_empty() {
+        if binance_cfg.testnet {
+            "https://testnet.binancefuture.com"
+        } else {
+            "https://fapi.binance.com"
+        }
+    } else {
+        &binance_cfg.base_url
+    };
+    let binance = Arc::new(BinanceExchange::new(
+        client.clone(),
+        binance_url,
+        &binance_cfg.api_key,
+        &binance_cfg.api_secret,
+    ));
+
+    if config.trading.enabled {
+        info!(
+            bybit_url = bybit_url,
+            binance_url = binance_url,
+            leverage = config.trading.leverage,
+            size_usd = config.trading.position_size_usd,
+            "Trading enabled"
+        );
+    } else {
+        info!("Trading disabled (set trading.enabled = true to activate)");
+    }
+
     info!("All components initialized. Starting detection loops.");
 
     // Set up graceful shutdown
     let shutdown = tokio::signal::ctrl_c();
 
-    // Run all detectors concurrently.
+    // Run all detectors + executor concurrently.
     // tokio::select! returns when ANY branch completes (or errors).
     tokio::select! {
         result = detectors::market_api::run(
@@ -92,6 +145,7 @@ async fn main() -> Result<()> {
             telegram.clone(),
             discord.clone(),
             stats.clone(),
+            trade_tx.clone(),
         ) => {
             error!(error = ?result, "Market API detector exited");
         }
@@ -103,6 +157,7 @@ async fn main() -> Result<()> {
             telegram.clone(),
             discord.clone(),
             stats.clone(),
+            trade_tx.clone(),
         ) => {
             error!(error = ?result, "WebSocket monitor exited");
         }
@@ -114,8 +169,20 @@ async fn main() -> Result<()> {
             telegram.clone(),
             discord.clone(),
             stats.clone(),
+            trade_tx.clone(),
         ) => {
             error!(error = ?result, "Notice detector exited");
+        }
+
+        result = trading::executor::run(
+            trade_rx,
+            config.trading.clone(),
+            bybit,
+            binance,
+            redis.clone(),
+            telegram.clone(),
+        ) => {
+            error!(error = ?result, "Trade executor exited");
         }
 
         _ = stats::run_daily_report(
