@@ -278,21 +278,8 @@ impl Config {
         }
     }
 
-    fn validate(&self) -> Result<()> {
-        if self.telegram.bot_token.is_empty() {
-            anyhow::bail!("TELEGRAM_BOT_TOKEN must be set (via config.toml or environment variable)");
-        }
-        if self.telegram.chat_id.is_empty() {
-            anyhow::bail!("TELEGRAM_CHAT_ID must be set (via config.toml or environment variable)");
-        }
-        if self.polling.market_interval_seconds == 0 {
-            anyhow::bail!("market_interval_seconds must be > 0");
-        }
-        if self.polling.notice_interval_seconds == 0 {
-            anyhow::bail!("notice_interval_seconds must be > 0");
-        }
-
-        // Validate trading users
+    /// Validate trading-specific rules only (for unit testing without full config).
+    fn validate_trading(&self) -> Result<()> {
         if self.trading.enabled {
             if self.trading.users.is_empty() {
                 anyhow::bail!("trading.enabled is true but no [[trading.users]] configured");
@@ -321,7 +308,216 @@ impl Config {
                 }
             }
         }
+        Ok(())
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.telegram.bot_token.is_empty() {
+            anyhow::bail!("TELEGRAM_BOT_TOKEN must be set (via config.toml or environment variable)");
+        }
+        if self.telegram.chat_id.is_empty() {
+            anyhow::bail!("TELEGRAM_CHAT_ID must be set (via config.toml or environment variable)");
+        }
+        if self.polling.market_interval_seconds == 0 {
+            anyhow::bail!("market_interval_seconds must be > 0");
+        }
+        if self.polling.notice_interval_seconds == 0 {
+            anyhow::bail!("notice_interval_seconds must be > 0");
+        }
+
+        self.validate_trading()?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: build a Config with valid non-trading fields so validate() doesn't
+    /// fail on telegram/polling checks. Only trading fields vary per test.
+    fn base_config(trading: TradingConfig) -> Config {
+        Config {
+            api: ApiConfig {
+                market_endpoint: "https://example.com".into(),
+                websocket_endpoint: "wss://example.com".into(),
+                notice_endpoint: String::new(),
+            },
+            polling: PollingConfig {
+                market_interval_seconds: 2,
+                notice_interval_seconds: 3,
+                websocket_reconnect_delay_seconds: 5,
+            },
+            redis: RedisConfig {
+                url: "redis://127.0.0.1".into(),
+                key_prefix: "test:".into(),
+                connection_timeout_seconds: 5,
+            },
+            telegram: TelegramConfig {
+                bot_token: "tok".into(),
+                chat_id: "123".into(),
+            },
+            discord: None,
+            filters: FilterConfig { min_confidence: 0.6 },
+            trading,
+        }
+    }
+
+    fn valid_user(name: &str) -> UserConfig {
+        UserConfig {
+            name: name.into(),
+            telegram_chat_id: "999".into(),
+            position_size_usd: 50.0,
+            leverage: 2,
+            max_open_positions: 3,
+            take_profit: TakeProfitConfig::default(),
+            stop_loss: StopLossConfig::default(),
+            time_exit: TimeExitConfig::default(),
+            bybit: ExchangeCredentials {
+                api_key: "key".into(),
+                api_secret: "secret".into(),
+                ..Default::default()
+            },
+            binance: ExchangeCredentials::default(),
+        }
+    }
+
+    // ── Parse multi-user TOML ────────────────────────────────────────
+
+    #[test]
+    fn parse_multi_user_toml() {
+        let toml_str = r#"
+            enabled = true
+            [[users]]
+            name = "alice"
+            telegram_chat_id = "111"
+            [users.bybit]
+            api_key = "akey"
+            api_secret = "asec"
+
+            [[users]]
+            name = "bob"
+            telegram_chat_id = "222"
+            leverage = 5
+            position_size_usd = 100.0
+            [users.binance]
+            api_key = "bkey"
+            api_secret = "bsec"
+        "#;
+
+        let trading: TradingConfig = toml::from_str(toml_str).unwrap();
+        assert!(trading.enabled);
+        assert_eq!(trading.users.len(), 2);
+        assert_eq!(trading.users[0].name, "alice");
+        assert_eq!(trading.users[1].name, "bob");
+        assert_eq!(trading.users[1].leverage, 5);
+        assert_eq!(trading.users[1].position_size_usd, 100.0);
+    }
+
+    // ── Default values ───────────────────────────────────────────────
+
+    #[test]
+    fn defaults_applied_for_minimal_user() {
+        let toml_str = r#"
+            enabled = true
+            [[users]]
+            name = "min"
+            telegram_chat_id = "999"
+            [users.bybit]
+            api_key = "k"
+            api_secret = "s"
+        "#;
+
+        let trading: TradingConfig = toml::from_str(toml_str).unwrap();
+        let u = &trading.users[0];
+        assert_eq!(u.leverage, 2);
+        assert_eq!(u.position_size_usd, 50.0);
+        assert_eq!(u.max_open_positions, 3);
+        assert_eq!(u.stop_loss.percent, 15.0);
+        assert_eq!(u.time_exit.minutes, 30);
+        assert_eq!(u.take_profit.levels.len(), 2);
+        assert!(u.bybit.testnet);
+    }
+
+    // ── Validation: duplicate names rejected ─────────────────────────
+
+    #[test]
+    fn reject_duplicate_user_names() {
+        let trading = TradingConfig {
+            enabled: true,
+            users: vec![valid_user("alice"), valid_user("alice")],
+        };
+        let cfg = base_config(trading);
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate user name"),
+            "expected duplicate name error, got: {err}"
+        );
+    }
+
+    // ── Validation: missing telegram_chat_id rejected ────────────────
+
+    #[test]
+    fn reject_missing_telegram_chat_id() {
+        let mut user = valid_user("alice");
+        user.telegram_chat_id = String::new();
+        let trading = TradingConfig {
+            enabled: true,
+            users: vec![user],
+        };
+        let cfg = base_config(trading);
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("telegram_chat_id must be set"),
+            "expected telegram_chat_id error, got: {err}"
+        );
+    }
+
+    // ── Validation: no exchange keys rejected ────────────────────────
+
+    #[test]
+    fn reject_no_exchange_keys() {
+        let mut user = valid_user("alice");
+        user.bybit = ExchangeCredentials::default();
+        user.binance = ExchangeCredentials::default();
+        let trading = TradingConfig {
+            enabled: true,
+            users: vec![user],
+        };
+        let cfg = base_config(trading);
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("at least one exchange"),
+            "expected exchange keys error, got: {err}"
+        );
+    }
+
+    // ── Validation: no users when enabled ────────────────────────────
+
+    #[test]
+    fn reject_enabled_with_no_users() {
+        let trading = TradingConfig {
+            enabled: true,
+            users: vec![],
+        };
+        let cfg = base_config(trading);
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("no [[trading.users]] configured"),
+            "expected no-users error, got: {err}"
+        );
+    }
+
+    // ── Validation: passes when disabled ─────────────────────────────
+
+    #[test]
+    fn passes_when_disabled_no_users() {
+        let trading = TradingConfig {
+            enabled: false,
+            users: vec![],
+        };
+        let cfg = base_config(trading);
+        cfg.validate().expect("should pass when trading disabled");
     }
 }

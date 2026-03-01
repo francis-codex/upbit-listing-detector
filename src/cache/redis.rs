@@ -202,3 +202,50 @@ impl Clone for RedisCache {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// We can't construct a full RedisCache without a live connection,
+    /// so test key generation via a thin wrapper that mirrors the logic.
+    struct KeyGen {
+        prefix: String,
+    }
+
+    impl KeyGen {
+        fn new(prefix: &str) -> Self {
+            Self { prefix: prefix.to_string() }
+        }
+        fn key(&self, suffix: &str) -> String {
+            format!("{}{}", self.prefix, suffix)
+        }
+        fn user_key(&self, user_id: &str, suffix: &str) -> String {
+            format!("{}user:{}:{}", self.prefix, user_id, suffix)
+        }
+    }
+
+    #[test]
+    fn user_key_correct_format() {
+        let kg = KeyGen::new("upbit:");
+        assert_eq!(kg.user_key("alice", "trade:BTC"), "upbit:user:alice:trade:BTC");
+    }
+
+    #[test]
+    fn different_users_produce_different_keys() {
+        let kg = KeyGen::new("upbit:");
+        let alice = kg.user_key("alice", "trade:BTC");
+        let bob = kg.user_key("bob", "trade:BTC");
+        assert_ne!(alice, bob);
+    }
+
+    #[test]
+    fn global_key_unaffected() {
+        let kg = KeyGen::new("upbit:");
+        assert_eq!(kg.key("markets"), "upbit:markets");
+    }
+
+    #[test]
+    fn user_key_positions() {
+        let kg = KeyGen::new("test:");
+        assert_eq!(kg.user_key("bob", "positions"), "test:user:bob:positions");
+    }
+}
