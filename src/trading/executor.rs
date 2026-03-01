@@ -6,7 +6,7 @@ use tracing::{error, info, warn};
 
 use crate::alerts::telegram::TelegramAlert;
 use crate::cache::redis::RedisCache;
-use crate::config::TradingConfig;
+use crate::config::UserConfig;
 
 use super::binance::BinanceExchange;
 use super::bybit::BybitExchange;
@@ -14,31 +14,39 @@ use super::exchange::Exchange;
 use super::position::{monitor_position, OpenPosition};
 use super::TradeSignal;
 
+/// Per-user bundle of exchange clients, config, and Telegram sender.
+pub struct UserContext {
+    pub config: UserConfig,
+    pub bybit: Arc<BybitExchange>,
+    pub binance: Arc<BinanceExchange>,
+    pub telegram: Arc<TelegramAlert>,
+}
+
 /// Run the trade executor loop.
 /// Receives TradeSignals from detectors via mpsc channel.
-/// For each signal, checks both exchanges, picks the best, and opens a trade.
+/// For each signal, fans out to ALL users in parallel.
 pub async fn run(
     mut rx: mpsc::Receiver<TradeSignal>,
-    config: TradingConfig,
-    bybit: Arc<BybitExchange>,
-    binance: Arc<BinanceExchange>,
+    enabled: bool,
+    users: Vec<UserContext>,
     redis: RedisCache,
-    telegram: Arc<TelegramAlert>,
 ) -> Result<()> {
-    info!("Trade executor started (enabled={})", config.enabled);
+    info!("Trade executor started (enabled={}, users={})", enabled, users.len());
 
-    // Resume any positions from Redis on startup
-    resume_positions(
-        &config,
-        bybit.clone(),
-        binance.clone(),
-        &redis,
-        telegram.clone(),
-    )
-    .await;
+    // Wrap users in Arc for cheap cloning into spawned tasks
+    let users = Arc::new(users);
+
+    // Resume any positions from Redis on startup for each user
+    for user in users.iter() {
+        resume_positions(
+            user,
+            &redis,
+        )
+        .await;
+    }
 
     while let Some(signal) = rx.recv().await {
-        if !config.enabled {
+        if !enabled {
             info!(
                 symbol = signal.symbol,
                 source = signal.source,
@@ -51,49 +59,57 @@ pub async fn run(
             symbol = signal.symbol,
             source = signal.source,
             confidence = ?signal.confidence,
-            "Received trade signal"
+            "Received trade signal, broadcasting to {} users",
+            users.len(),
         );
 
-        let config = config.clone();
-        let bybit = bybit.clone();
-        let binance = binance.clone();
-        let redis = redis.clone();
-        let telegram = telegram.clone();
+        // Fan out to all users in parallel
+        for (idx, _) in users.iter().enumerate() {
+            let signal = signal.clone();
+            let users = users.clone();
+            let redis = redis.clone();
 
-        // Handle each signal in a separate task so we don't block the receiver
-        tokio::spawn(async move {
-            if let Err(e) =
-                handle_signal(signal, &config, bybit, binance, &redis, telegram.clone()).await
-            {
-                error!(error = %e, "Trade signal handling failed");
-            }
-        });
+            tokio::spawn(async move {
+                let user = &users[idx];
+                if let Err(e) = handle_signal_for_user(
+                    signal,
+                    user,
+                    &redis,
+                ).await {
+                    error!(
+                        user = user.config.name,
+                        error = %e,
+                        "Trade signal handling failed"
+                    );
+                }
+            });
+        }
     }
 
     warn!("Trade executor channel closed, exiting");
     Ok(())
 }
 
-async fn handle_signal(
+async fn handle_signal_for_user(
     signal: TradeSignal,
-    config: &TradingConfig,
-    bybit: Arc<BybitExchange>,
-    binance: Arc<BinanceExchange>,
+    user: &UserContext,
     redis: &RedisCache,
-    telegram: Arc<TelegramAlert>,
 ) -> Result<()> {
+    let config = &user.config;
+    let user_id = &config.name;
     let futures_symbol = format!("{}USDT", signal.symbol);
 
-    // Dedup: check if we already traded this symbol recently
-    if redis.is_trade_recent(&signal.symbol).await? {
-        info!(symbol = signal.symbol, "Trade already placed recently, skipping");
+    // Dedup: check if this user already traded this symbol recently
+    if redis.is_trade_recent(user_id, &signal.symbol).await? {
+        info!(user = user_id, symbol = signal.symbol, "Trade already placed recently, skipping");
         return Ok(());
     }
 
-    // Check max open positions
-    let positions = redis.get_open_positions().await?;
+    // Check this user's max open positions
+    let positions = redis.get_open_positions(user_id).await?;
     if positions.len() >= config.max_open_positions as usize {
         warn!(
+            user = user_id,
             symbol = signal.symbol,
             open = positions.len(),
             max = config.max_open_positions,
@@ -104,8 +120,8 @@ async fn handle_signal(
 
     // Check both exchanges in parallel
     let (bybit_exists, binance_exists) = tokio::join!(
-        bybit.symbol_exists(&futures_symbol),
-        binance.symbol_exists(&futures_symbol),
+        user.bybit.symbol_exists(&futures_symbol),
+        user.binance.symbol_exists(&futures_symbol),
     );
 
     let bybit_ok = bybit_exists.unwrap_or(false);
@@ -113,6 +129,7 @@ async fn handle_signal(
 
     if !bybit_ok && !binance_ok {
         info!(
+            user = user_id,
             symbol = futures_symbol,
             "Symbol not found on either exchange"
         );
@@ -122,29 +139,31 @@ async fn handle_signal(
     // Pick exchange with more volume (or whichever has it)
     let exchange: Arc<dyn Exchange> = if bybit_ok && binance_ok {
         let (bybit_vol, binance_vol) = tokio::join!(
-            bybit.get_volume(&futures_symbol),
-            binance.get_volume(&futures_symbol),
+            user.bybit.get_volume(&futures_symbol),
+            user.binance.get_volume(&futures_symbol),
         );
         let bv = bybit_vol.unwrap_or(0.0);
         let bnv = binance_vol.unwrap_or(0.0);
         info!(
+            user = user_id,
             bybit_volume = bv,
             binance_volume = bnv,
             "Comparing exchange volumes"
         );
         if bv >= bnv {
-            bybit as Arc<dyn Exchange>
+            user.bybit.clone() as Arc<dyn Exchange>
         } else {
-            binance as Arc<dyn Exchange>
+            user.binance.clone() as Arc<dyn Exchange>
         }
     } else if bybit_ok {
-        bybit as Arc<dyn Exchange>
+        user.bybit.clone() as Arc<dyn Exchange>
     } else {
-        binance as Arc<dyn Exchange>
+        user.binance.clone() as Arc<dyn Exchange>
     };
 
     let exchange_name = exchange.name().to_string();
     info!(
+        user = user_id,
         symbol = futures_symbol,
         exchange = exchange_name,
         "Opening position"
@@ -164,6 +183,7 @@ async fn handle_signal(
         .await?;
 
     info!(
+        user = user_id,
         order_id = result.order_id,
         symbol = result.symbol,
         qty = result.filled_qty,
@@ -173,11 +193,12 @@ async fn handle_signal(
     );
 
     // Record trade dedup
-    redis.record_trade(&signal.symbol).await?;
+    redis.record_trade(user_id, &signal.symbol).await?;
 
     // Build position object
     let position = OpenPosition {
         id: uuid::Uuid::new_v4().to_string(),
+        user_id: user_id.clone(),
         symbol: futures_symbol.clone(),
         exchange_name: exchange_name.clone(),
         entry_price: result.avg_price,
@@ -189,7 +210,7 @@ async fn handle_signal(
     };
 
     // Persist position
-    redis.save_position(&position).await?;
+    redis.save_position(user_id, &position).await?;
 
     // Send Telegram notification
     let tp_msg = config
@@ -211,6 +232,7 @@ async fn handle_signal(
     let msg = format!(
         "\u{1f4c8} *TRADE OPENED — {}*\n\
          \n\
+         *User:* {}\n\
          *Exchange:* {}\n\
          *Entry Price:* ${:.4}\n\
          *Size:* {:.3} ({:.0} USD)\n\
@@ -221,6 +243,7 @@ async fn handle_signal(
          *SL:* -{}%\n\
          *Timeout:* {} min",
         futures_symbol,
+        user_id,
         exchange_name,
         result.avg_price,
         result.filled_qty,
@@ -231,12 +254,12 @@ async fn handle_signal(
         config.stop_loss.percent,
         config.time_exit.minutes,
     );
-    let _ = telegram.send_message(&msg).await;
+    let _ = user.telegram.send_message(&msg).await;
 
     // Spawn position monitor
     let monitor_config = config.clone();
     let monitor_redis = redis.clone();
-    let monitor_telegram = telegram.clone();
+    let monitor_telegram = user.telegram.clone();
     tokio::spawn(async move {
         monitor_position(
             position,
@@ -251,18 +274,16 @@ async fn handle_signal(
     Ok(())
 }
 
-/// On startup, resume monitoring any positions saved in Redis.
+/// On startup, resume monitoring any positions saved in Redis for a user.
 async fn resume_positions(
-    config: &TradingConfig,
-    bybit: Arc<BybitExchange>,
-    binance: Arc<BinanceExchange>,
+    user: &UserContext,
     redis: &RedisCache,
-    telegram: Arc<TelegramAlert>,
 ) {
-    let positions = match redis.get_open_positions().await {
+    let user_id = &user.config.name;
+    let positions = match redis.get_open_positions(user_id).await {
         Ok(p) => p,
         Err(e) => {
-            error!(error = %e, "Failed to load positions from Redis");
+            error!(user = user_id, error = %e, "Failed to load positions from Redis");
             return;
         }
     };
@@ -271,27 +292,28 @@ async fn resume_positions(
         return;
     }
 
-    info!(count = positions.len(), "Resuming open positions from Redis");
+    info!(user = user_id, count = positions.len(), "Resuming open positions from Redis");
 
     for position in positions {
         let exchange: Arc<dyn Exchange> = if position.exchange_name == "Bybit" {
-            bybit.clone()
+            user.bybit.clone()
         } else {
-            binance.clone()
+            user.binance.clone()
         };
 
-        let config = config.clone();
+        let config = user.config.clone();
         let redis = redis.clone();
-        let telegram = telegram.clone();
+        let telegram = user.telegram.clone();
 
         let msg = format!(
             "\u{1f504} *RESUMING POSITION — {}*\n\
+             *User:* {}\n\
              *Exchange:* {}\n\
              *Entry:* ${:.4}\n\
              *Remaining Qty:* {:.3}",
-            position.symbol, position.exchange_name, position.entry_price, position.remaining_qty,
+            position.symbol, user_id, position.exchange_name, position.entry_price, position.remaining_qty,
         );
-        let _ = telegram.send_message(&msg).await;
+        let _ = user.telegram.send_message(&msg).await;
 
         tokio::spawn(async move {
             monitor_position(position, exchange, config, redis, telegram).await;

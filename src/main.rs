@@ -18,6 +18,7 @@ use crate::cache::redis::RedisCache;
 use crate::config::Config;
 use crate::trading::bybit::BybitExchange;
 use crate::trading::binance::BinanceExchange;
+use crate::trading::executor::UserContext;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -58,7 +59,7 @@ async fn main() -> Result<()> {
     redis.ping().await.context("Redis ping failed")?;
     info!("Redis connection verified");
 
-    // Build alert senders
+    // Build alert senders (global — for detection alerts)
     let telegram = Arc::new(TelegramAlert::new(
         client.clone(),
         &config.telegram.bot_token,
@@ -83,47 +84,70 @@ async fn main() -> Result<()> {
     // Create trade signal channel (mpsc)
     let (trade_tx, trade_rx) = tokio::sync::mpsc::channel(64);
 
-    // Build exchange clients
-    let bybit_cfg = &config.trading.bybit;
-    let bybit_url = if bybit_cfg.base_url.is_empty() {
-        if bybit_cfg.testnet {
-            "https://api-testnet.bybit.com"
+    // Build per-user exchange clients and Telegram senders
+    let mut user_contexts = Vec::new();
+    for user_cfg in &config.trading.users {
+        let bybit_creds = &user_cfg.bybit;
+        let bybit_url = if bybit_creds.base_url.is_empty() {
+            if bybit_creds.testnet {
+                "https://api-testnet.bybit.com"
+            } else {
+                "https://api.bybit.com"
+            }
         } else {
-            "https://api.bybit.com"
-        }
-    } else {
-        &bybit_cfg.base_url
-    };
-    let bybit = Arc::new(BybitExchange::new(
-        client.clone(),
-        bybit_url,
-        &bybit_cfg.api_key,
-        &bybit_cfg.api_secret,
-    ));
+            &bybit_creds.base_url
+        };
+        let bybit = Arc::new(BybitExchange::new(
+            client.clone(),
+            bybit_url,
+            &bybit_creds.api_key,
+            &bybit_creds.api_secret,
+        ));
 
-    let binance_cfg = &config.trading.binance;
-    let binance_url = if binance_cfg.base_url.is_empty() {
-        if binance_cfg.testnet {
-            "https://testnet.binancefuture.com"
+        let binance_creds = &user_cfg.binance;
+        let binance_url = if binance_creds.base_url.is_empty() {
+            if binance_creds.testnet {
+                "https://testnet.binancefuture.com"
+            } else {
+                "https://fapi.binance.com"
+            }
         } else {
-            "https://fapi.binance.com"
-        }
-    } else {
-        &binance_cfg.base_url
-    };
-    let binance = Arc::new(BinanceExchange::new(
-        client.clone(),
-        binance_url,
-        &binance_cfg.api_key,
-        &binance_cfg.api_secret,
-    ));
+            &binance_creds.base_url
+        };
+        let binance = Arc::new(BinanceExchange::new(
+            client.clone(),
+            binance_url,
+            &binance_creds.api_key,
+            &binance_creds.api_secret,
+        ));
+
+        // Each user gets their own Telegram sender (same bot token, different chat_id)
+        let user_telegram = Arc::new(TelegramAlert::new(
+            client.clone(),
+            &config.telegram.bot_token,
+            &user_cfg.telegram_chat_id,
+        ));
+
+        info!(
+            user = user_cfg.name,
+            bybit_url = bybit_url,
+            binance_url = binance_url,
+            leverage = user_cfg.leverage,
+            size_usd = user_cfg.position_size_usd,
+            "User trading config loaded"
+        );
+
+        user_contexts.push(UserContext {
+            config: user_cfg.clone(),
+            bybit,
+            binance,
+            telegram: user_telegram,
+        });
+    }
 
     if config.trading.enabled {
         info!(
-            bybit_url = bybit_url,
-            binance_url = binance_url,
-            leverage = config.trading.leverage,
-            size_usd = config.trading.position_size_usd,
+            user_count = user_contexts.len(),
             "Trading enabled"
         );
     } else {
@@ -176,11 +200,9 @@ async fn main() -> Result<()> {
 
         result = trading::executor::run(
             trade_rx,
-            config.trading.clone(),
-            bybit,
-            binance,
+            config.trading.enabled,
+            user_contexts,
             redis.clone(),
-            telegram.clone(),
         ) => {
             error!(error = ?result, "Trade executor exited");
         }

@@ -22,32 +22,39 @@ chat_id = ""
 min_confidence = 0.6
 
 [trading]
-enabled = false                    # kill-switch, default OFF
-position_size_usd = 50.0          # fixed USD per trade
-leverage = 2                       # start conservative
-max_open_positions = 3             # prevent runaway
+enabled = false                    # global kill-switch, default OFF
 
-[trading.take_profit]
+# Each user has independent exchange accounts, position sizes, and Telegram notifications.
+# Env var override pattern: {UPPERCASE_NAME}_BYBIT_API_KEY, {UPPERCASE_NAME}_TELEGRAM_CHAT_ID, etc.
+
+[[trading.users]]
+name = "alice"
+telegram_chat_id = ""             # env: ALICE_TELEGRAM_CHAT_ID
+position_size_usd = 50.0
+leverage = 2
+max_open_positions = 3
+
+[trading.users.take_profit]
 levels = [
     { percent = 80.0, close_fraction = 0.5 },
     { percent = 100.0, close_fraction = 1.0 },
 ]
 
-[trading.stop_loss]
+[trading.users.stop_loss]
 percent = 15.0
 
-[trading.time_exit]
+[trading.users.time_exit]
 minutes = 30
 
-[trading.bybit]
-# Set via environment variables BYBIT_API_KEY and BYBIT_API_SECRET
+[trading.users.bybit]
+# Set via environment variables ALICE_BYBIT_API_KEY and ALICE_BYBIT_API_SECRET
 api_key = ""
 api_secret = ""
 testnet = true
 base_url = "https://api-testnet.bybit.com"
 
-[trading.binance]
-# Set via environment variables BINANCE_API_KEY and BINANCE_API_SECRET
+[trading.users.binance]
+# Set via environment variables ALICE_BINANCE_API_KEY and ALICE_BINANCE_API_SECRET
 api_key = ""
 api_secret = ""
 testnet = true

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -56,6 +57,24 @@ pub struct FilterConfig {
 pub struct TradingConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub users: Vec<UserConfig>,
+}
+
+impl Default for TradingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            users: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct UserConfig {
+    pub name: String,
+    #[serde(default)]
+    pub telegram_chat_id: String,
     #[serde(default = "default_position_size")]
     pub position_size_usd: f64,
     #[serde(default = "default_leverage")]
@@ -156,22 +175,6 @@ impl Default for ExchangeCredentials {
     }
 }
 
-impl Default for TradingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            position_size_usd: default_position_size(),
-            leverage: default_leverage(),
-            max_open_positions: default_max_positions(),
-            take_profit: TakeProfitConfig::default(),
-            stop_loss: StopLossConfig::default(),
-            time_exit: TimeExitConfig::default(),
-            bybit: ExchangeCredentials::default(),
-            binance: ExchangeCredentials::default(),
-        }
-    }
-}
-
 impl Config {
     /// Load configuration from config.toml and environment variables.
     /// Environment variables override file values for secrets.
@@ -211,18 +214,24 @@ impl Config {
             config.discord = Some(DiscordConfig { webhook_url: val });
         }
 
-        // Trading exchange credentials
-        if let Ok(val) = std::env::var("BYBIT_API_KEY") {
-            config.trading.bybit.api_key = val;
-        }
-        if let Ok(val) = std::env::var("BYBIT_API_SECRET") {
-            config.trading.bybit.api_secret = val;
-        }
-        if let Ok(val) = std::env::var("BINANCE_API_KEY") {
-            config.trading.binance.api_key = val;
-        }
-        if let Ok(val) = std::env::var("BINANCE_API_SECRET") {
-            config.trading.binance.api_secret = val;
+        // Per-user env var overrides: {UPPERNAME}_BYBIT_API_KEY, etc.
+        for user in &mut config.trading.users {
+            let prefix = user.name.to_uppercase();
+            if let Ok(val) = std::env::var(format!("{prefix}_BYBIT_API_KEY")) {
+                user.bybit.api_key = val;
+            }
+            if let Ok(val) = std::env::var(format!("{prefix}_BYBIT_API_SECRET")) {
+                user.bybit.api_secret = val;
+            }
+            if let Ok(val) = std::env::var(format!("{prefix}_BINANCE_API_KEY")) {
+                user.binance.api_key = val;
+            }
+            if let Ok(val) = std::env::var(format!("{prefix}_BINANCE_API_SECRET")) {
+                user.binance.api_secret = val;
+            }
+            if let Ok(val) = std::env::var(format!("{prefix}_TELEGRAM_CHAT_ID")) {
+                user.telegram_chat_id = val;
+            }
         }
 
         config.validate()?;
@@ -282,6 +291,37 @@ impl Config {
         if self.polling.notice_interval_seconds == 0 {
             anyhow::bail!("notice_interval_seconds must be > 0");
         }
+
+        // Validate trading users
+        if self.trading.enabled {
+            if self.trading.users.is_empty() {
+                anyhow::bail!("trading.enabled is true but no [[trading.users]] configured");
+            }
+
+            let mut names = HashSet::new();
+            for user in &self.trading.users {
+                if user.name.is_empty() {
+                    anyhow::bail!("trading.users: each user must have a non-empty name");
+                }
+                if !names.insert(&user.name) {
+                    anyhow::bail!("trading.users: duplicate user name '{}'", user.name);
+                }
+                if user.telegram_chat_id.is_empty() {
+                    anyhow::bail!(
+                        "trading.users['{}']: telegram_chat_id must be set (via config or {}_TELEGRAM_CHAT_ID env var)",
+                        user.name,
+                        user.name.to_uppercase(),
+                    );
+                }
+                if user.bybit.api_key.is_empty() && user.binance.api_key.is_empty() {
+                    anyhow::bail!(
+                        "trading.users['{}']: at least one exchange (bybit or binance) must have API keys configured",
+                        user.name,
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 }

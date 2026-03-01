@@ -7,7 +7,7 @@ use tracing::{error, info, warn};
 
 use crate::alerts::telegram::TelegramAlert;
 use crate::cache::redis::RedisCache;
-use crate::config::TradingConfig;
+use crate::config::UserConfig;
 
 use super::exchange::Exchange;
 
@@ -15,6 +15,7 @@ use super::exchange::Exchange;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenPosition {
     pub id: String,
+    pub user_id: String,
     pub symbol: String,
     pub exchange_name: String,
     pub entry_price: f64,
@@ -39,11 +40,12 @@ enum MonitorAction {
 pub async fn monitor_position(
     position: OpenPosition,
     exchange: Arc<dyn Exchange>,
-    config: TradingConfig,
+    config: UserConfig,
     redis: RedisCache,
     telegram: Arc<TelegramAlert>,
 ) {
     let symbol = &position.symbol;
+    let user_id = &position.user_id;
     let entry_price = position.entry_price;
     let mut remaining_qty = position.remaining_qty;
     let mut tp_levels_hit = position.tp_levels_hit.clone();
@@ -55,6 +57,7 @@ pub async fn monitor_position(
     let time_limit = Duration::from_secs(config.time_exit.minutes * 60);
 
     info!(
+        user = user_id,
         symbol = symbol,
         entry_price = entry_price,
         qty = remaining_qty,
@@ -95,6 +98,7 @@ pub async fn monitor_position(
             MonitorAction::TakeProfit { level_idx, close_qty, current_price } => {
                 let tp_pct = config.take_profit.levels[level_idx].percent;
                 info!(
+                    user = user_id,
                     symbol = symbol,
                     tp_level = level_idx,
                     pnl_pct = format!("{:.1}", pnl_pct),
@@ -110,6 +114,7 @@ pub async fn monitor_position(
                         let msg = format!(
                             "\u{2705} *TP{} HIT — {}*\n\
                              \n\
+                             *User:* {}\n\
                              *Exchange:* {}\n\
                              *Entry:* ${:.4}\n\
                              *Exit:* ${:.4}\n\
@@ -117,6 +122,7 @@ pub async fn monitor_position(
                              *Closed:* {:.3} (remaining: {:.3})",
                             level_idx + 1,
                             symbol,
+                            user_id,
                             position.exchange_name,
                             entry_price,
                             current_price,
@@ -132,7 +138,7 @@ pub async fn monitor_position(
                             tp_levels_hit: tp_levels_hit.clone(),
                             ..position.clone()
                         };
-                        let _ = redis.save_position(&updated).await;
+                        let _ = redis.save_position(user_id, &updated).await;
                     }
                     Err(e) => {
                         error!(symbol = symbol, error = %e, "Failed to close TP order");
@@ -140,13 +146,14 @@ pub async fn monitor_position(
                 }
 
                 if remaining_qty <= 0.001 {
-                    info!(symbol = symbol, "Position fully closed via TP");
-                    let _ = redis.remove_position(position_id).await;
+                    info!(user = user_id, symbol = symbol, "Position fully closed via TP");
+                    let _ = redis.remove_position(user_id, position_id).await;
                     return;
                 }
             }
             MonitorAction::StopLoss { current_price } => {
                 warn!(
+                    user = user_id,
                     symbol = symbol,
                     pnl_pct = format!("{:.1}", pnl_pct),
                     "Stop loss triggered"
@@ -157,12 +164,14 @@ pub async fn monitor_position(
                         let msg = format!(
                             "\u{1f534} *STOP LOSS — {}*\n\
                              \n\
+                             *User:* {}\n\
                              *Exchange:* {}\n\
                              *Entry:* ${:.4}\n\
                              *Exit:* ${:.4}\n\
                              *PnL:* {:.1}%\n\
                              *Closed:* {:.3}",
                             symbol,
+                            user_id,
                             position.exchange_name,
                             entry_price,
                             current_price,
@@ -176,11 +185,12 @@ pub async fn monitor_position(
                     }
                 }
 
-                let _ = redis.remove_position(position_id).await;
+                let _ = redis.remove_position(user_id, position_id).await;
                 return;
             }
             MonitorAction::TimeExit { current_price } => {
                 warn!(
+                    user = user_id,
                     symbol = symbol,
                     pnl_pct = format!("{:.1}", pnl_pct),
                     minutes = config.time_exit.minutes,
@@ -192,6 +202,7 @@ pub async fn monitor_position(
                         let msg = format!(
                             "\u{23f0} *TIME EXIT — {}*\n\
                              \n\
+                             *User:* {}\n\
                              *Exchange:* {}\n\
                              *Entry:* ${:.4}\n\
                              *Exit:* ${:.4}\n\
@@ -199,6 +210,7 @@ pub async fn monitor_position(
                              *Closed:* {:.3}\n\
                              *Reason:* {} min timeout",
                             symbol,
+                            user_id,
                             position.exchange_name,
                             entry_price,
                             current_price,
@@ -213,7 +225,7 @@ pub async fn monitor_position(
                     }
                 }
 
-                let _ = redis.remove_position(position_id).await;
+                let _ = redis.remove_position(user_id, position_id).await;
                 return;
             }
             MonitorAction::Continue => {}
@@ -226,7 +238,7 @@ fn evaluate_action(
     current_price: f64,
     remaining_qty: f64,
     tp_levels_hit: &[usize],
-    config: &TradingConfig,
+    config: &UserConfig,
     opened_at: Instant,
     time_limit: Duration,
 ) -> MonitorAction {
@@ -264,9 +276,10 @@ fn evaluate_action(
 mod tests {
     use super::*;
 
-    fn test_config() -> TradingConfig {
-        TradingConfig {
-            enabled: true,
+    fn test_config() -> UserConfig {
+        UserConfig {
+            name: "test".to_string(),
+            telegram_chat_id: "123".to_string(),
             position_size_usd: 50.0,
             leverage: 2,
             max_open_positions: 3,

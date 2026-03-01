@@ -33,6 +33,10 @@ impl RedisCache {
         format!("{}{}", self.prefix, suffix)
     }
 
+    fn user_key(&self, user_id: &str, suffix: &str) -> String {
+        format!("{}user:{}:{}", self.prefix, user_id, suffix)
+    }
+
     // ── Market codes ──────────────────────────────────────────────────
 
     /// Retrieve the set of known market codes from Redis.
@@ -105,11 +109,11 @@ impl RedisCache {
         Ok(())
     }
 
-    // ── Trade deduplication ─────────────────────────────────────────
+    // ── Per-user trade deduplication ─────────────────────────────────
 
-    /// Check if a trade was already placed for this symbol recently (1h TTL).
-    pub async fn is_trade_recent(&self, symbol: &str) -> Result<bool> {
-        let key = self.key(&format!("trade:{symbol}"));
+    /// Check if a trade was already placed for this symbol by this user recently (1h TTL).
+    pub async fn is_trade_recent(&self, user_id: &str, symbol: &str) -> Result<bool> {
+        let key = self.user_key(user_id, &format!("trade:{symbol}"));
         let exists: bool = self
             .conn
             .clone()
@@ -119,9 +123,9 @@ impl RedisCache {
         Ok(exists)
     }
 
-    /// Record that a trade was placed for a symbol (1h TTL).
-    pub async fn record_trade(&self, symbol: &str) -> Result<()> {
-        let key = self.key(&format!("trade:{symbol}"));
+    /// Record that a trade was placed for a symbol by a user (1h TTL).
+    pub async fn record_trade(&self, user_id: &str, symbol: &str) -> Result<()> {
+        let key = self.user_key(user_id, &format!("trade:{symbol}"));
         let now = chrono::Utc::now().timestamp();
         self.conn
             .clone()
@@ -131,36 +135,36 @@ impl RedisCache {
         Ok(())
     }
 
-    // ── Position persistence ──────────────────────────────────────────
+    // ── Per-user position persistence ────────────────────────────────
 
-    /// Save an open position to Redis (hash map keyed by position ID).
-    pub async fn save_position(&self, position: &OpenPosition) -> Result<()> {
-        let key = self.key("positions");
+    /// Save an open position to Redis (user-scoped hash map keyed by position ID).
+    pub async fn save_position(&self, user_id: &str, position: &OpenPosition) -> Result<()> {
+        let key = self.user_key(user_id, "positions");
         let json = serde_json::to_string(position).context("Failed to serialize position")?;
         self.conn
             .clone()
             .hset::<_, _, _, ()>(&key, &position.id, &json)
             .await
             .context("Redis HSET failed for position")?;
-        debug!(id = position.id, symbol = position.symbol, "Position saved");
+        debug!(user = user_id, id = position.id, symbol = position.symbol, "Position saved");
         Ok(())
     }
 
     /// Remove a closed position from Redis.
-    pub async fn remove_position(&self, position_id: &str) -> Result<()> {
-        let key = self.key("positions");
+    pub async fn remove_position(&self, user_id: &str, position_id: &str) -> Result<()> {
+        let key = self.user_key(user_id, "positions");
         self.conn
             .clone()
             .hdel::<_, _, ()>(&key, position_id)
             .await
             .context("Redis HDEL failed for position")?;
-        debug!(id = position_id, "Position removed");
+        debug!(user = user_id, id = position_id, "Position removed");
         Ok(())
     }
 
-    /// Get all open positions from Redis.
-    pub async fn get_open_positions(&self) -> Result<Vec<OpenPosition>> {
-        let key = self.key("positions");
+    /// Get all open positions for a user from Redis.
+    pub async fn get_open_positions(&self, user_id: &str) -> Result<Vec<OpenPosition>> {
+        let key = self.user_key(user_id, "positions");
         let entries: std::collections::HashMap<String, String> = self
             .conn
             .clone()
