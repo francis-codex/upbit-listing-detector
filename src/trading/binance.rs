@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use anyhow::{Context, Result};
 use reqwest::Client;
 use tracing::debug;
@@ -10,6 +13,7 @@ pub struct BinanceExchange {
     base_url: String,
     api_key: String,
     api_secret: String,
+    qty_step_cache: Mutex<HashMap<String, f64>>,
 }
 
 impl BinanceExchange {
@@ -19,6 +23,7 @@ impl BinanceExchange {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             api_secret: api_secret.to_string(),
+            qty_step_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -141,6 +146,9 @@ impl Exchange for BinanceExchange {
     }
 
     async fn get_qty_step(&self, symbol: &str) -> Result<f64> {
+        if let Some(&step) = self.qty_step_cache.lock().unwrap().get(symbol) {
+            return Ok(step);
+        }
         let path = format!("/fapi/v1/exchangeInfo?symbol={}", symbol);
         let json = self.public_get(&path).await?;
         let symbols = json["symbols"]
@@ -161,6 +169,7 @@ impl Exchange for BinanceExchange {
             .as_str()
             .context("Missing stepSize in LOT_SIZE filter")?;
         let step: f64 = step_str.parse().context("Failed to parse stepSize")?;
+        self.qty_step_cache.lock().unwrap().insert(symbol.to_string(), step);
         Ok(step)
     }
 

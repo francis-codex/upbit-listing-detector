@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use anyhow::{Context, Result};
 use reqwest::Client;
 use tracing::debug;
@@ -10,6 +13,7 @@ pub struct BybitExchange {
     base_url: String,
     api_key: String,
     api_secret: String,
+    qty_step_cache: Mutex<HashMap<String, f64>>,
 }
 
 impl BybitExchange {
@@ -19,6 +23,7 @@ impl BybitExchange {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             api_secret: api_secret.to_string(),
+            qty_step_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -156,6 +161,9 @@ impl Exchange for BybitExchange {
     }
 
     async fn get_qty_step(&self, symbol: &str) -> Result<f64> {
+        if let Some(&step) = self.qty_step_cache.lock().unwrap().get(symbol) {
+            return Ok(step);
+        }
         let path = format!(
             "/v5/market/instruments-info?category=linear&symbol={}",
             symbol
@@ -167,6 +175,7 @@ impl Exchange for BybitExchange {
         let step: f64 = step_str
             .parse()
             .context("Failed to parse qtyStep")?;
+        self.qty_step_cache.lock().unwrap().insert(symbol.to_string(), step);
         Ok(step)
     }
 
