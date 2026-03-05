@@ -12,6 +12,13 @@ pub struct OrderResult {
     pub avg_price: f64,
 }
 
+/// Round a quantity down to the exchange's step size and format it as a string.
+pub fn format_qty(qty: f64, step: f64) -> String {
+    let rounded = (qty / step).floor() * step;
+    let decimals = (-step.log10()).ceil().max(0.0) as usize;
+    format!("{:.prec$}", rounded, prec = decimals)
+}
+
 /// Unified exchange interface for futures trading.
 #[async_trait]
 pub trait Exchange: Send + Sync {
@@ -28,6 +35,9 @@ pub trait Exchange: Send + Sync {
 
     /// Set the leverage for a symbol. Must be called before opening a position.
     async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<()>;
+
+    /// Get the minimum quantity step size for a symbol (e.g. 0.001 for BTC).
+    async fn get_qty_step(&self, symbol: &str) -> Result<f64>;
 
     /// Open a long market order for the given notional USD size.
     /// The implementation should calculate the appropriate quantity from the current price.

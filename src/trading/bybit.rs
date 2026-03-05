@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use tracing::debug;
 
-use super::exchange::{Exchange, OrderResult};
+use super::exchange::{format_qty, Exchange, OrderResult};
 use super::signing::hmac_sha256;
 
 pub struct BybitExchange {
@@ -155,16 +155,35 @@ impl Exchange for BybitExchange {
         }
     }
 
+    async fn get_qty_step(&self, symbol: &str) -> Result<f64> {
+        let path = format!(
+            "/v5/market/instruments-info?category=linear&symbol={}",
+            symbol
+        );
+        let json = self.public_get(&path).await?;
+        let step_str = json["result"]["list"][0]["lotSizeFilter"]["qtyStep"]
+            .as_str()
+            .context("Missing qtyStep in Bybit instrument info")?;
+        let step: f64 = step_str
+            .parse()
+            .context("Failed to parse qtyStep")?;
+        Ok(step)
+    }
+
     async fn open_long(&self, symbol: &str, size_usd: f64) -> Result<OrderResult> {
-        // Get current price to calculate qty
         let price = self.get_price(symbol).await?;
         if price <= 0.0 {
             anyhow::bail!("Invalid price {price} for {symbol}");
         }
 
+        let step = self.get_qty_step(symbol).await?;
         let qty = size_usd / price;
-        // Round to reasonable precision (3 decimal places)
-        let qty_str = format!("{:.3}", qty);
+        let qty_str = format_qty(qty, step);
+        if qty_str.parse::<f64>().unwrap_or(0.0) <= 0.0 {
+            anyhow::bail!(
+                "Order size ${size_usd} too small for {symbol} at price {price} (step {step})"
+            );
+        }
 
         let body = serde_json::json!({
             "category": "linear",
@@ -191,7 +210,11 @@ impl Exchange for BybitExchange {
     }
 
     async fn close_long(&self, symbol: &str, qty: f64) -> Result<OrderResult> {
-        let qty_str = format!("{:.3}", qty);
+        let step = self.get_qty_step(symbol).await?;
+        let qty_str = format_qty(qty, step);
+        if qty_str.parse::<f64>().unwrap_or(0.0) <= 0.0 {
+            anyhow::bail!("Close quantity too small for {symbol} (qty {qty}, step {step})");
+        }
 
         let body = serde_json::json!({
             "category": "linear",

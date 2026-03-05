@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use tracing::debug;
 
-use super::exchange::{Exchange, OrderResult};
+use super::exchange::{format_qty, Exchange, OrderResult};
 use super::signing::hmac_sha256;
 
 pub struct BinanceExchange {
@@ -140,14 +140,44 @@ impl Exchange for BinanceExchange {
         }
     }
 
+    async fn get_qty_step(&self, symbol: &str) -> Result<f64> {
+        let path = format!("/fapi/v1/exchangeInfo?symbol={}", symbol);
+        let json = self.public_get(&path).await?;
+        let symbols = json["symbols"]
+            .as_array()
+            .context("Missing symbols in Binance exchangeInfo")?;
+        let info = symbols
+            .iter()
+            .find(|s| s["symbol"].as_str() == Some(symbol))
+            .context("Symbol not found in Binance exchangeInfo")?;
+        let filters = info["filters"]
+            .as_array()
+            .context("Missing filters in Binance symbol info")?;
+        let lot_size = filters
+            .iter()
+            .find(|f| f["filterType"].as_str() == Some("LOT_SIZE"))
+            .context("Missing LOT_SIZE filter")?;
+        let step_str = lot_size["stepSize"]
+            .as_str()
+            .context("Missing stepSize in LOT_SIZE filter")?;
+        let step: f64 = step_str.parse().context("Failed to parse stepSize")?;
+        Ok(step)
+    }
+
     async fn open_long(&self, symbol: &str, size_usd: f64) -> Result<OrderResult> {
         let price = self.get_price(symbol).await?;
         if price <= 0.0 {
             anyhow::bail!("Invalid price {price} for {symbol}");
         }
 
+        let step = self.get_qty_step(symbol).await?;
         let qty = size_usd / price;
-        let qty_str = format!("{:.3}", qty);
+        let qty_str = format_qty(qty, step);
+        if qty_str.parse::<f64>().unwrap_or(0.0) <= 0.0 {
+            anyhow::bail!(
+                "Order size ${size_usd} too small for {symbol} at price {price} (step {step})"
+            );
+        }
 
         let params = [
             ("symbol", symbol),
@@ -178,7 +208,11 @@ impl Exchange for BinanceExchange {
     }
 
     async fn close_long(&self, symbol: &str, qty: f64) -> Result<OrderResult> {
-        let qty_str = format!("{:.3}", qty);
+        let step = self.get_qty_step(symbol).await?;
+        let qty_str = format_qty(qty, step);
+        if qty_str.parse::<f64>().unwrap_or(0.0) <= 0.0 {
+            anyhow::bail!("Close quantity too small for {symbol} (qty {qty}, step {step})");
+        }
 
         let params = [
             ("symbol", symbol),
