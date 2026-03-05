@@ -37,6 +37,14 @@ async fn main() -> Result<()> {
         "Starting Upbit Listing Detector"
     );
 
+    // Parse --simulate <SYMBOL> flag for testing the trade pipeline
+    let simulate_symbol: Option<String> = {
+        let args: Vec<String> = std::env::args().collect();
+        args.iter()
+            .position(|a| a == "--simulate")
+            .and_then(|i| args.get(i + 1).cloned())
+    };
+
     // Load configuration
     let config = Arc::new(Config::load().context("Failed to load configuration")?);
     info!("Configuration loaded successfully");
@@ -155,6 +163,22 @@ async fn main() -> Result<()> {
     }
 
     info!("All components initialized. Starting detection loops.");
+
+    // Inject a simulated listing signal for testing the trade pipeline
+    if let Some(ref symbol) = simulate_symbol {
+        let tx = trade_tx.clone();
+        let sym = symbol.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            info!(symbol = %sym, "Injecting simulated listing signal");
+            let signal = trading::TradeSignal {
+                symbol: sym,
+                source: "Simulated".to_string(),
+                confidence: Some(0.95),
+            };
+            let _ = tx.try_send(signal);
+        });
+    }
 
     // Set up graceful shutdown
     let shutdown = tokio::signal::ctrl_c();
