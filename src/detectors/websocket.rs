@@ -12,7 +12,7 @@ use crate::alerts::discord::DiscordAlert;
 use crate::alerts::telegram::TelegramAlert;
 use crate::cache::redis::RedisCache;
 use crate::config::Config;
-use crate::detectors::market_api::Market;
+use crate::detectors::Market;
 use crate::stats::Stats;
 use crate::trading::TradeSignal;
 
@@ -72,9 +72,19 @@ async fn connect_and_listen(
     stats: &Stats,
     trade_tx: &tokio::sync::mpsc::Sender<TradeSignal>,
 ) -> Result<()> {
-    // Fetch current market codes to subscribe to
-    let markets = fetch_krw_codes(client, market_url).await?;
-    let codes: Vec<String> = markets.iter().map(|m| m.market.clone()).collect();
+    // Fetch current market codes to subscribe to and seed Redis
+    let all_markets = fetch_all_markets(client, market_url).await?;
+    let all_codes: std::collections::HashSet<String> =
+        all_markets.iter().map(|m| m.market.clone()).collect();
+    if let Err(e) = redis.set_markets(&all_codes).await {
+        warn!(error = %e, "Failed to seed Redis markets from WebSocket startup");
+    }
+
+    let codes: Vec<String> = all_markets
+        .iter()
+        .filter(|m| m.market.starts_with("KRW-"))
+        .map(|m| m.market.clone())
+        .collect();
 
     if codes.is_empty() {
         warn!("No KRW markets found, skipping WebSocket connection");
@@ -221,8 +231,8 @@ fn extract_market_code(text: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// Fetch current KRW-* market codes from the REST API.
-async fn fetch_krw_codes(client: &Client, url: &str) -> Result<Vec<Market>> {
+/// Fetch all market codes from the REST API.
+async fn fetch_all_markets(client: &Client, url: &str) -> Result<Vec<Market>> {
     let resp = client
         .get(url)
         .send()
@@ -234,10 +244,5 @@ async fn fetch_krw_codes(client: &Client, url: &str) -> Result<Vec<Market>> {
         .await
         .context("Failed to parse markets for WebSocket")?;
 
-    let krw: Vec<Market> = markets
-        .into_iter()
-        .filter(|m| m.market.starts_with("KRW-"))
-        .collect();
-
-    Ok(krw)
+    Ok(markets)
 }

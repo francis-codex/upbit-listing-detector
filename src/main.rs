@@ -186,18 +186,6 @@ async fn main() -> Result<()> {
     // Run all detectors + executor concurrently.
     // tokio::select! returns when ANY branch completes (or errors).
     tokio::select! {
-        result = detectors::market_api::run(
-            config.clone(),
-            redis.clone(),
-            client.clone(),
-            telegram.clone(),
-            discord.clone(),
-            stats.clone(),
-            trade_tx.clone(),
-        ) => {
-            error!(error = ?result, "Market API detector exited");
-        }
-
         result = detectors::websocket::run(
             config.clone(),
             redis.clone(),

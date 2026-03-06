@@ -5,7 +5,7 @@ notice_endpoint = "https://api-manager.upbit.com/api/v1/announcements?os=web&pag
 
 [polling]
 market_interval_seconds = 2
-notice_interval_seconds = 3
+notice_interval_seconds = 2
 websocket_reconnect_delay_seconds = 5
 
 [redis]

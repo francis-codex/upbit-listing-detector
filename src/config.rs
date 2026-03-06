@@ -318,9 +318,6 @@ impl Config {
         if self.telegram.chat_id.is_empty() {
             anyhow::bail!("TELEGRAM_CHAT_ID must be set (via config.toml or environment variable)");
         }
-        if self.polling.market_interval_seconds == 0 {
-            anyhow::bail!("market_interval_seconds must be > 0");
-        }
         if self.polling.notice_interval_seconds == 0 {
             anyhow::bail!("notice_interval_seconds must be > 0");
         }

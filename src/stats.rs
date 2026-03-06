@@ -11,7 +11,6 @@ use crate::cache::redis::RedisCache;
 /// Shared counters for tracking detector activity.
 #[derive(Debug)]
 pub struct Stats {
-    pub market_polls: AtomicU64,
     pub notice_polls: AtomicU64,
     pub new_listings_detected: AtomicU64,
     pub ws_connected: AtomicBool,
@@ -21,7 +20,6 @@ pub struct Stats {
 impl Stats {
     pub fn new() -> Self {
         Self {
-            market_polls: AtomicU64::new(0),
             notice_polls: AtomicU64::new(0),
             new_listings_detected: AtomicU64::new(0),
             ws_connected: AtomicBool::new(false),
@@ -44,6 +42,7 @@ pub async fn run_daily_report(
     telegram: Arc<TelegramAlert>,
 ) {
     let kst_offset = chrono::FixedOffset::east_opt(9 * 3600).unwrap();
+    let mut last_sent_date: Option<chrono::NaiveDate> = None;
 
     loop {
         // Calculate sleep duration until next 9:00 AM KST
@@ -62,7 +61,8 @@ pub async fn run_daily_report(
         let next_9am_kst = next_9am
             .and_local_timezone(kst_offset)
             .unwrap();
-        let wait_secs = (next_9am_kst - now_kst).num_seconds().max(1) as u64;
+        // Add 2 seconds buffer to avoid sub-second undershoot causing double sends
+        let wait_secs = ((next_9am_kst - now_kst).num_seconds() + 2).max(2) as u64;
 
         info!(
             next_report_in_hours = wait_secs / 3600,
@@ -71,8 +71,13 @@ pub async fn run_daily_report(
 
         sleep(Duration::from_secs(wait_secs)).await;
 
+        // Guard: skip if we already sent a report for today's date
+        let today = Utc::now().with_timezone(&kst_offset).date_naive();
+        if last_sent_date == Some(today) {
+            continue;
+        }
+
         // Gather real data
-        let market_polls = stats.market_polls.load(Ordering::Relaxed);
         let notice_polls = stats.notice_polls.load(Ordering::Relaxed);
         let listings_today = stats.new_listings_detected.swap(0, Ordering::Relaxed);
         let ws_status = if stats.ws_connected.load(Ordering::Relaxed) {
@@ -88,15 +93,13 @@ pub async fn run_daily_report(
             Err(_) => 0,
         };
 
-        let now_kst = Utc::now().with_timezone(&kst_offset);
-        let date_str = now_kst.format("%Y-%m-%d");
+        let date_str = today.format("%Y-%m-%d");
 
         let message = format!(
             "\u{1f4ca} *Daily Status Report — {date}*\n\
              \n\
              *Uptime:* {uptime}\n\
              *Markets monitored:* {markets}\n\
-             *Market API polls:* {market_polls}\n\
              *Notice board checks:* {notice_polls}\n\
              *WebSocket:* {ws}\n\
              *New listings today:* {listings}\n\
@@ -105,7 +108,6 @@ pub async fn run_daily_report(
             date = date_str,
             uptime = uptime,
             markets = market_count,
-            market_polls = market_polls,
             notice_polls = notice_polls,
             ws = ws_status,
             listings = listings_today,
@@ -114,6 +116,7 @@ pub async fn run_daily_report(
         if let Err(e) = telegram.send_message(&message).await {
             error!(error = %e, "Failed to send daily report");
         } else {
+            last_sent_date = Some(today);
             info!("Daily health report sent");
         }
     }

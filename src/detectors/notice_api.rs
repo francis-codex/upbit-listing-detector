@@ -113,6 +113,7 @@ pub async fn run(
                         discord.as_deref(),
                         min_confidence,
                         &trade_tx,
+                        &stats,
                     )
                     .await
                     {
@@ -175,6 +176,7 @@ async fn process_notice(
     discord: Option<&DiscordAlert>,
     min_confidence: f32,
     trade_tx: &tokio::sync::mpsc::Sender<TradeSignal>,
+    stats: &Stats,
 ) -> Result<()> {
     let id = notice.id_string();
 
@@ -200,6 +202,8 @@ async fn process_notice(
 
     // Parse token info
     let listing_info = parser::parse_listing(&notice.title, filter_result.confidence);
+
+    stats.new_listings_detected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     info!(
         id = id,
